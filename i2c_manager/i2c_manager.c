@@ -63,13 +63,13 @@ static i2c_manager_t i2c_managers[I2C_NUM_MAX] = {0};
 
 // 超时定义
 #ifdef I2C_ZERO
-    #define I2C_MANAGER_0_TIMEOUT_TICKS (CONFIG_I2C_MANAGER_0_TIMEOUT / portTICK_PERIOD_MS)
-    #define I2C_MANAGER_0_LOCK_TIMEOUT_TICKS (CONFIG_I2C_MANAGER_0_LOCK_TIMEOUT / portTICK_PERIOD_MS)
+    #define I2C_MANAGER_0_TIMEOUT_MS        (CONFIG_I2C_MANAGER_0_TIMEOUT)
+    #define I2C_MANAGER_0_LOCK_TIMEOUT_TICKS pdMS_TO_TICKS(CONFIG_I2C_MANAGER_0_LOCK_TIMEOUT)
 #endif
 
 #ifdef I2C_ONE
-    #define I2C_MANAGER_1_TIMEOUT_TICKS (CONFIG_I2C_MANAGER_1_TIMEOUT / portTICK_PERIOD_MS)
-    #define I2C_MANAGER_1_LOCK_TIMEOUT_TICKS (CONFIG_I2C_MANAGER_1_LOCK_TIMEOUT / portTICK_PERIOD_MS)
+    #define I2C_MANAGER_1_TIMEOUT_MS        (CONFIG_I2C_MANAGER_1_TIMEOUT)
+    #define I2C_MANAGER_1_LOCK_TIMEOUT_TICKS pdMS_TO_TICKS(CONFIG_I2C_MANAGER_1_LOCK_TIMEOUT)
 #endif
 
 // 错误处理宏
@@ -135,7 +135,7 @@ esp_err_t I2C_FN(_init)(i2c_port_t port)
     esp_err_t ret = ESP_OK;
     
     // 创建互斥锁
-    mgr->mutex = xSemaphoreCreateMutex();
+    mgr->mutex = xSemaphoreCreateRecursiveMutex();
     if (mgr->mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create mutex for port %d", port);
         return ESP_ERR_NO_MEM;
@@ -210,18 +210,18 @@ esp_err_t I2C_FN(_read)(i2c_port_t port, uint16_t addr, uint32_t reg, uint8_t *b
     }
     
     // 获取超时时间
-    TickType_t timeout = pdMS_TO_TICKS(1000); // 默认1秒
+int timeout_ms = 1000; // 默认1000ms
 #ifdef I2C_ZERO
     if (port == I2C_NUM_0) {
-        timeout = I2C_MANAGER_0_TIMEOUT_TICKS;
+        timeout_ms = I2C_MANAGER_0_TIMEOUT_MS;
     }
 #endif
 #ifdef I2C_ONE
     if (port == I2C_NUM_1) {
-        timeout = I2C_MANAGER_1_TIMEOUT_TICKS;
+        timeout_ms = I2C_MANAGER_1_TIMEOUT_MS;
     }
 #endif
-    
+
     // 获取锁
     if (I2C_FN(_lock)(port) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to acquire lock for port %d", port);
@@ -242,10 +242,10 @@ esp_err_t I2C_FN(_read)(i2c_port_t port, uint16_t addr, uint32_t reg, uint8_t *b
             reg_buf[0] = reg & 0xFF;
         }
         
-        ret = i2c_master_transmit_receive(dev_handle, reg_buf, reg_len, buffer, size, timeout);
+        ret = i2c_master_transmit_receive(dev_handle, reg_buf, reg_len, buffer, size, timeout_ms);
     } else {
         // 直接读取
-        ret = i2c_master_receive(dev_handle, buffer, size, timeout);
+        ret = i2c_master_receive(dev_handle, buffer, size, timeout_ms);
     }
     
     I2C_FN(_unlock)(port);
@@ -284,15 +284,15 @@ esp_err_t I2C_FN(_write)(i2c_port_t port, uint16_t addr, uint32_t reg, const uin
     }
     
     // 获取超时时间
-    TickType_t timeout = pdMS_TO_TICKS(1000); // 默认1秒
+    int timeout_ms = 1000; // 默认1秒
 #ifdef I2C_ZERO
     if (port == I2C_NUM_0) {
-        timeout = I2C_MANAGER_0_TIMEOUT_TICKS;
+        timeout_ms = I2C_MANAGER_0_TIMEOUT_MS;
     }
 #endif
 #ifdef I2C_ONE
     if (port == I2C_NUM_1) {
-        timeout = I2C_MANAGER_1_TIMEOUT_TICKS;
+        timeout_ms = I2C_MANAGER_1_TIMEOUT_MS;
     }
 #endif
     
@@ -323,12 +323,12 @@ esp_err_t I2C_FN(_write)(i2c_port_t port, uint16_t addr, uint32_t reg, const uin
         }
         
         memcpy(&write_buf[reg_len], buffer, size);
-        ret = i2c_master_transmit(dev_handle, write_buf, reg_len + size, timeout);
+        ret = i2c_master_transmit(dev_handle, write_buf, reg_len + size, timeout_ms);
         
         free(write_buf);
     } else {
         // 直接写入数据
-        ret = i2c_master_transmit(dev_handle, buffer, size, timeout);
+        ret = i2c_master_transmit(dev_handle, buffer, size, timeout_ms);
     }
     
     I2C_FN(_unlock)(port);
@@ -382,13 +382,13 @@ esp_err_t I2C_FN(_close)(i2c_port_t port)
 esp_err_t I2C_FN(_lock)(i2c_port_t port)
 {
     I2C_PORT_CHECK(port, ESP_FAIL);
-    
+
     i2c_manager_t *mgr = &i2c_managers[port];
-    
+
     if (!mgr->initialized || mgr->mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    
+
     TickType_t timeout = portMAX_DELAY;
 #ifdef I2C_ZERO
     if (port == I2C_NUM_0) {
@@ -400,8 +400,9 @@ esp_err_t I2C_FN(_lock)(i2c_port_t port)
         timeout = I2C_MANAGER_1_LOCK_TIMEOUT_TICKS;
     }
 #endif
-    
-    if (xSemaphoreTake(mgr->mutex, timeout) == pdTRUE) {
+
+    if (xSemaphoreTakeRecursive(mgr->mutex, timeout) == pdTRUE) {
+
         return ESP_OK;
     } else {
         ESP_LOGW(TAG, "Failed to acquire lock for port %d within timeout", port);
@@ -413,17 +414,19 @@ esp_err_t I2C_FN(_lock)(i2c_port_t port)
 esp_err_t I2C_FN(_unlock)(i2c_port_t port)
 {
     I2C_PORT_CHECK(port, ESP_FAIL);
-    
+
     i2c_manager_t *mgr = &i2c_managers[port];
-    
+
     if (!mgr->initialized || mgr->mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    if (xSemaphoreGive(mgr->mutex) == pdTRUE) {
+
+    if (xSemaphoreGiveRecursive(mgr->mutex) == pdTRUE) {
+
         return ESP_OK;
     } else {
         ESP_LOGW(TAG, "Failed to release lock for port %d", port);
+
         return ESP_ERR_INVALID_STATE;
     }
 }
@@ -432,18 +435,15 @@ esp_err_t I2C_FN(_unlock)(i2c_port_t port)
 esp_err_t I2C_FN(_force_unlock)(i2c_port_t port)
 {
     I2C_PORT_CHECK(port, ESP_FAIL);
-    
+
     i2c_manager_t *mgr = &i2c_managers[port];
-    
     if (!mgr->initialized || mgr->mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    // 强制释放锁 - 注意这可能会导致竞态条件
-    xSemaphoreGive(mgr->mutex);
-    
+
+    xSemaphoreGiveRecursive(mgr->mutex);
+
     ESP_LOGW(TAG, "Forced unlock for port %d", port);
-    
     return ESP_OK;
 }
 
